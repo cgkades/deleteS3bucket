@@ -81,11 +81,12 @@ func deleteWorker(jobs <-chan s3.DeleteObjectInput, wg *sync.WaitGroup, svc *s3.
 }
 
 func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
-	markerJobs := make(chan s3.DeleteObjectInput, 100)
-	versionJobs := make(chan s3.DeleteObjectInput, 100)
+	markerJobs := make(chan s3.DeleteObjectInput, 1000)
+	versionJobs := make(chan s3.DeleteObjectInput, 1000)
 	var wg sync.WaitGroup
+	wokerCount := 50
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < wokerCount; i++ {
 		wg.Add(1)
 		go deleteWorker(markerJobs, &wg, svc)
 	}
@@ -108,12 +109,12 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 				}
 			}
 			close(markerJobs)
+
 			wg.Wait()
-			for i := 0; i < 5; i++ {
+			for i := 0; i < wokerCount; i++ {
 				wg.Add(1)
 				go deleteWorker(versionJobs, &wg, svc)
 			}
-
 			InfoLogger.Print("Deleting Versions...")
 			for _, version := range page.Versions {
 				key := version.Key
