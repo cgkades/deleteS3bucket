@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"log"
 	"os"
+	"sync"
 )
 
 var (
@@ -17,6 +18,9 @@ var (
 	ErrorLogger   *log.Logger
 	verbosity     *bool
 )
+
+// Todo: Add passing of the session to the functions
+// Todo: Convert deletes into go routine calls, or parallization if that is better
 
 func main () {
 	var bucketName = flag.String("b", "unknown", "Bucket name")
@@ -36,8 +40,20 @@ func main () {
 	}
 	InfoLogger.Printf("Bucket %s was found in %s\n", *bucketName, bucketRegion)
 
-	deleteAllVersions(*bucketName, bucketRegion)
-	deleteBucket(*bucketName, bucketRegion)
+	sess, err := session.NewSessionWithOptions(session.Options{
+		Config: aws.Config{
+			Region: aws.String(bucketRegion),
+		},
+		SharedConfigState: session.SharedConfigEnable,
+	})
+	svc := s3.New(sess)
+
+	if err != nil {
+		exitErrorf("Unable to setup s3 connection: %v", err)
+	}
+
+	deleteAllVersions(*bucketName, bucketRegion, svc)
+	deleteBucket(*bucketName, bucketRegion, svc)
 }
 
 func getRegion(bucketName string) string {
@@ -50,22 +66,33 @@ func getRegion(bucketName string) string {
 	return region
 }
 
-func deleteAllVersions(bucketName string, region string) bool {
-	sess, err := session.NewSessionWithOptions(session.Options{
-		Config: aws.Config{
-			Region: aws.String(region),
-		},
-		SharedConfigState: session.SharedConfigEnable,
-	})
-	svc := s3.New(sess)
+func deleteWorker(jobs <-chan s3.DeleteObjectInput, wg *sync.WaitGroup, svc *s3.S3) {
+	defer wg.Done()
+	for s3Object := range jobs{
+		_, err := svc.DeleteObject(&s3Object)
+		if *verbosity{
+			InfoLogger.Printf("Deleting Marker %s: %s\n", *s3Object.Key,  *s3Object.VersionId)
+		}
+		if err != nil {
+			WarningLogger.Printf("Unable to delete marker %s: %s\n", *s3Object.Key, *s3Object.VersionId)
+		}
+	}
 
-	if err != nil {
-		exitErrorf("Unable to setup s3 connection: %v", err)
+}
+
+func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
+	markerJobs := make(chan s3.DeleteObjectInput, 100)
+	versionJobs := make(chan s3.DeleteObjectInput, 100)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go deleteWorker(markerJobs, &wg, svc)
 	}
 
 	//Go through all pages of Object Versions and delete them
 	pageNum := 0
-	err = svc.ListObjectVersionsPages(&s3.ListObjectVersionsInput{Bucket: aws.String(bucketName)},
+	err := svc.ListObjectVersionsPages(&s3.ListObjectVersionsInput{Bucket: aws.String(bucketName)},
 		func(page *s3.ListObjectVersionsOutput, lastPage bool) bool {
 			if *verbosity {
 				InfoLogger.Printf("Page %d: %d versions\n", pageNum, len(page.Versions))
@@ -74,31 +101,32 @@ func deleteAllVersions(bucketName string, region string) bool {
 			for _, deleteMarker := range page.DeleteMarkers {
 				key := deleteMarker.Key
 				versionId := deleteMarker.VersionId
-
-				svc.DeleteObject(&s3.DeleteObjectInput{
+				markerJobs <- s3.DeleteObjectInput{
 					Key: key,
 					VersionId: versionId,
 					Bucket: &bucketName,
-				})
-				if *verbosity{
-					InfoLogger.Printf("Deleting Marker %s: %s\n", *key, *versionId)
 				}
-
 			}
+			close(markerJobs)
+			wg.Wait()
+			for i := 0; i < 5; i++ {
+				wg.Add(1)
+				go deleteWorker(versionJobs, &wg, svc)
+			}
+
 			InfoLogger.Print("Deleting Versions...")
 			for _, version := range page.Versions {
 				key := version.Key
 				versionId := version.VersionId
 
-				svc.DeleteObject(&s3.DeleteObjectInput{
+				versionJobs <- s3.DeleteObjectInput{
 					Key: key,
 					VersionId: versionId,
 					Bucket: &bucketName,
-				})
-				if *verbosity{
-					InfoLogger.Printf("Deleting version %s: %s\n", *key, *versionId)
 				}
 			}
+			close(versionJobs)
+			wg.Wait()
 			return !lastPage
 		})
 	if err != nil {
@@ -127,22 +155,12 @@ func deleteAllVersions(bucketName string, region string) bool {
 	return true
 }
 
-func deleteBucket(bucketName string, region string) bool {
-	sess, err := session.NewSessionWithOptions(session.Options{
-		Config: aws.Config{
-			Region: aws.String(region),
-		},
-		SharedConfigState: session.SharedConfigEnable,
-	})
-	svc := s3.New(sess)
+func deleteBucket(bucketName string, region string, svc *s3.S3) bool {
 	if *verbosity {
 		InfoLogger.Printf("Deleting bucket %s....", bucketName)
 	}
-	if err != nil {
-		exitErrorf("Unable to setup s3 connection: %v", err)
-	}
 
-	_, err = svc.DeleteBucket(&s3.DeleteBucketInput{
+	_, err := svc.DeleteBucket(&s3.DeleteBucketInput{
 		Bucket: aws.String(bucketName),
 	})
 	if err != nil {
