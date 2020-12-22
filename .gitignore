@@ -4,6 +4,7 @@
 *.dll
 *.so
 *.dylib
+deleteS3bucket
 
 # Test binary, built with `go test -c`
 *.test
