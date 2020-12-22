@@ -71,20 +71,25 @@ func deleteWorker(jobs <-chan s3.DeleteObjectInput, wg *sync.WaitGroup, svc *s3.
 	for s3Object := range jobs{
 		_, err := svc.DeleteObject(&s3Object)
 		if *verbosity{
-			InfoLogger.Printf("Deleting Marker %s: %s\n", *s3Object.Key,  *s3Object.VersionId)
+			InfoLogger.Printf("Deleting %s: %s\n", *s3Object.Key,  *s3Object.VersionId)
 		}
 		if err != nil {
-			WarningLogger.Printf("Unable to delete marker %s: %s\n", *s3Object.Key, *s3Object.VersionId)
+			WarningLogger.Printf("Unable to delete %s: %s\n", *s3Object.Key, *s3Object.VersionId)
 		}
 	}
 
 }
 
 func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
-	markerJobs := make(chan s3.DeleteObjectInput, 1000)
-	versionJobs := make(chan s3.DeleteObjectInput, 1000)
-	var wg sync.WaitGroup
+	channelSize := 1000
 	workerCount := 50
+
+	markerJobs := make(chan s3.DeleteObjectInput, channelSize)
+	versionJobs := make(chan s3.DeleteObjectInput, channelSize)
+	bucketJobs := make(chan s3.DeleteObjectInput, channelSize)
+
+	var wg sync.WaitGroup
+
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
@@ -109,8 +114,9 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 				}
 			}
 			close(markerJobs)
-
 			wg.Wait()
+
+			versionJobs = make(chan s3.DeleteObjectInput, channelSize)
 			for i := 0; i < workerCount; i++ {
 				wg.Add(1)
 				go deleteWorker(versionJobs, &wg, svc)
@@ -128,12 +134,18 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 			}
 			close(versionJobs)
 			wg.Wait()
+
 			return !lastPage
 		})
 	if err != nil {
 		exitErrorf("Unable to do versioning things for %q, %v", bucketName, err)
 	}
 
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go deleteWorker(bucketJobs, &wg, svc)
+	}
 	InfoLogger.Print("Deleting all Objects...")
 	//Go through all pages of Objects and delete them
 	err = svc.ListObjectsV2Pages(&s3.ListObjectsV2Input{Bucket: aws.String(bucketName)},
@@ -141,15 +153,13 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 			for _, content := range page.Contents {
 				key := content.Key
 				//Do the delete here
-				svc.DeleteObject(&s3.DeleteObjectInput{
+				bucketJobs <- s3.DeleteObjectInput{
 					Key: key,
 					Bucket: &bucketName,
-				})
-				if *verbosity{
-					InfoLogger.Printf("Deleting Object %s\n", *key)
 				}
-
 			}
+			close(bucketJobs)
+			wg.Wait()
 			return true
 		})
 
