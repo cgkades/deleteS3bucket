@@ -3,13 +3,14 @@ package main
 import (
 	"context"
 	"flag"
+	"log"
+	"os"
+	"sync"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"log"
-	"os"
-	"sync"
 )
 
 var (
@@ -19,10 +20,7 @@ var (
 	verbosity     *bool
 )
 
-// Todo: Add passing of the session to the functions
-// Todo: Convert deletes into go routine calls, or parallization if that is better
-
-func main () {
+func main() {
 	var bucketName = flag.String("b", "unknown", "Bucket name")
 	verbosity = flag.Bool("v", false, "Set to verbose logging")
 	flag.Parse()
@@ -68,10 +66,10 @@ func getRegion(bucketName string) string {
 
 func deleteWorker(jobs <-chan s3.DeleteObjectInput, wg *sync.WaitGroup, svc *s3.S3) {
 	defer wg.Done()
-	for s3Object := range jobs{
+	for s3Object := range jobs {
 		_, err := svc.DeleteObject(&s3Object)
-		if *verbosity{
-			InfoLogger.Printf("Deleting %s: %s\n", *s3Object.Key,  *s3Object.VersionId)
+		if *verbosity {
+			InfoLogger.Printf("Deleting %s: %s\n", *s3Object.Key, *s3Object.VersionId)
 		}
 		if err != nil {
 			WarningLogger.Printf("Unable to delete %s: %s\n", *s3Object.Key, *s3Object.VersionId)
@@ -90,7 +88,6 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 
 	var wg sync.WaitGroup
 
-
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go deleteWorker(markerJobs, &wg, svc)
@@ -108,9 +105,9 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 				key := deleteMarker.Key
 				versionId := deleteMarker.VersionId
 				markerJobs <- s3.DeleteObjectInput{
-					Key: key,
+					Key:       key,
 					VersionId: versionId,
-					Bucket: &bucketName,
+					Bucket:    &bucketName,
 				}
 			}
 			close(markerJobs)
@@ -127,9 +124,9 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 				versionId := version.VersionId
 
 				versionJobs <- s3.DeleteObjectInput{
-					Key: key,
+					Key:       key,
 					VersionId: versionId,
-					Bucket: &bucketName,
+					Bucket:    &bucketName,
 				}
 			}
 			close(versionJobs)
@@ -140,7 +137,6 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 	if err != nil {
 		exitErrorf("Unable to do versioning things for %q, %v", bucketName, err)
 	}
-
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
@@ -154,7 +150,7 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 				key := content.Key
 				//Do the delete here
 				bucketJobs <- s3.DeleteObjectInput{
-					Key: key,
+					Key:    key,
 					Bucket: &bucketName,
 				}
 			}
