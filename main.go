@@ -78,6 +78,57 @@ func deleteWorker(jobs <-chan s3.DeleteObjectInput, wg *sync.WaitGroup, svc *s3.
 
 }
 
+func deleteMarkers(deleteMarkers []*s3.DeleteMarkerEntry, svc *s3.S3, bucketName string, workerCount int) *sync.WaitGroup {
+	markerJobs := make(chan s3.DeleteObjectInput, 1000)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go deleteWorker(markerJobs, &wg, svc, "Marker")
+	}
+	InfoLogger.Print("Deleting Delete Markers...")
+	go func() {
+		defer close(markerJobs)
+		for _, deleteMarker := range deleteMarkers {
+			key := deleteMarker.Key
+			versionId := deleteMarker.VersionId
+			markerJobs <- s3.DeleteObjectInput{
+				Key:       key,
+				VersionId: versionId,
+				Bucket:    &bucketName,
+			}
+		}
+	}()
+	return &wg
+}
+
+func deleteVersions(deleteVersions []*s3.ObjectVersion, svc *s3.S3, bucketName string, workerCount int) *sync.WaitGroup {
+	versionJobs := make(chan s3.DeleteObjectInput, 1000)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go deleteWorker(versionJobs, &wg, svc, "Version")
+	}
+	InfoLogger.Print("Deleting Versions...")
+
+	go func() {
+		defer close(versionJobs)
+		for _, version := range deleteVersions {
+			key := version.Key
+			versionId := version.VersionId
+
+			versionJobs <- s3.DeleteObjectInput{
+				Key:       key,
+				VersionId: versionId,
+				Bucket:    &bucketName,
+			}
+		}
+	}()
+	return &wg
+}
+
+
 func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 	channelSize := 1000
 	workerCount := 500
@@ -88,54 +139,11 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 	pageNum := 0
 	err := svc.ListObjectVersionsPages(&s3.ListObjectVersionsInput{Bucket: aws.String(bucketName)},
 		func(page *s3.ListObjectVersionsOutput, lastPage bool) bool {
-			markerJobs := make(chan s3.DeleteObjectInput, channelSize)
-			versionJobs := make(chan s3.DeleteObjectInput, channelSize)
-
 			if *verbosity {
 				InfoLogger.Printf("Page %d: %d versions\n", pageNum, len(page.Versions))
 			}
-			InfoLogger.Print("Deleting Delete Markers...")
-
-			for i := 0; i < workerCount; i++ {
-				wg.Add(1)
-				go deleteWorker(markerJobs, &wg, svc, "Marker")
-			}
-			go func() {
-				defer close(markerJobs)
-				for _, deleteMarker := range page.DeleteMarkers {
-					key := deleteMarker.Key
-					versionId := deleteMarker.VersionId
-					markerJobs <- s3.DeleteObjectInput{
-						Key:       key,
-						VersionId: versionId,
-						Bucket:    &bucketName,
-					}
-				}
-			}()
-			//close(markerJobs)
-			wg.Wait()
-
-			for i := 0; i < workerCount; i++ {
-				wg.Add(1)
-				go deleteWorker(versionJobs, &wg, svc, "Version")
-			}
-			InfoLogger.Print("Deleting Versions...")
-
-			go func() {
-				defer close(versionJobs)
-				for _, version := range page.Versions {
-					key := version.Key
-					versionId := version.VersionId
-
-					versionJobs <- s3.DeleteObjectInput{
-						Key:       key,
-						VersionId: versionId,
-						Bucket:    &bucketName,
-					}
-				}
-			}()
-			//close(versionJobs)
-			wg.Wait()
+			deleteMarkers(page.DeleteMarkers, svc, bucketName, workerCount).Wait()
+			deleteVersions(page.Versions, svc, bucketName, workerCount).Wait()
 
 			return !lastPage
 		})
