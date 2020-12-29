@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -149,6 +150,10 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 	err := svc.ListObjectVersionsPages(&s3.ListObjectVersionsInput{Bucket: aws.String(bucketName)},
 		func(page *s3.ListObjectVersionsOutput, lastPage bool) bool {
 			deleteMarkers(page.DeleteMarkers, svc, bucketName).Wait()
+			//Although there is no race condition in the code, there is on the server side
+			//10 milliseconds seems to be enough of a wait time between deletion of a marker
+			//and it's version
+			time.Sleep(10 * time.Millisecond)
 			deleteVersions(page.Versions, svc, bucketName).Wait()
 			return !lastPage
 		})
