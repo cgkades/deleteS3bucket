@@ -7,7 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"github.com/cenkalti/backoff"
+	"github.com/cenkalti/backoff/v4"
 	"log"
 	"os"
 	"sync"
@@ -64,63 +64,32 @@ func getRegion(bucketName string) string {
 	return region
 }
 
-func deleteWorker(jobs <-chan s3.DeleteObjectInput, wg *sync.WaitGroup, svc *s3.S3, deleteType string) {
-	defer wg.Done()
-	for s3Object := range jobs {
-		//backoff.Retry(func() error{
-		//	_, err := svc.DeleteObject(&s3Object)
-		//	if *verbosity {
-		//		InfoLogger.Printf("Deleting %s: %s\n", *s3Object.Key, *s3Object.VersionId)
-		//	}
-		//	if err != nil {
-		//		WarningLogger.Printf("Unable to delete %s %s: %s\n", deleteType, *s3Object.Key, *s3Object.VersionId)
-		//		return err
-		//	} else {
-		//		return nil
-		//	}
-		//
-		//}, backoff.NewExponentialBackOff())
-		for i := 0; i < 4;i++ {
-			_, err := svc.DeleteObject(&s3Object)
-			if *verbosity {
-				InfoLogger.Printf("Deleting %s: %s\n", *s3Object.Key, *s3Object.VersionId)
-			}
-			if err != nil {
-				WarningLogger.Printf("RT: %d Unable to delete %s %s: %s\n", i, deleteType, *s3Object.Key, *s3Object.VersionId)
-			} else {
-				continue
-			}
-
-		}
-
-	}
-
-}
-
 func deleteS3Object(s3Object s3.DeleteObjectInput, wg *sync.WaitGroup, svc *s3.S3, deleteType string) {
 	defer wg.Done()
+
 	attempt := 1
-	
-	backoff.Retry(func() error{
+	err := backoff.Retry(func() error{
 		_, err := svc.DeleteObject(&s3Object)
 		if *verbosity {
-			InfoLogger.Printf("Deleting %s: %s\n", *s3Object.Key, *s3Object.VersionId)
+			InfoLogger.Printf("RT: %d Deleting %s: %s\n", attempt, *s3Object.Key, *s3Object.VersionId)
 		}
 		if err != nil {
-			WarningLogger.Printf("RT: %d Unable to delete %s %s: %s\n", attempt, deleteType, *s3Object.Key, *s3Object.VersionId)
+			if *verbosity {
+				WarningLogger.Printf("RT: %d Unable to delete %s %s: %s\n", attempt, deleteType, *s3Object.Key, *s3Object.VersionId)
+			}
+			attempt++
 			return err
 		} else {
+			if *verbosity {
+				InfoLogger.Printf("RT: %d Deleted %s: %s\n", attempt, *s3Object.Key, *s3Object.VersionId)
+			}
 			return nil
 		}
 
 	}, backoff.NewExponentialBackOff())
-	//_, err := svc.DeleteObject(&s3Object)
-	//if *verbosity {
-	//	InfoLogger.Printf("Deleting %s: %s\n", *s3Object.Key, *s3Object.VersionId)
-	//}
-	//if err != nil {
-	//	WarningLogger.Printf("Unable to delete %s %s: %s\n", deleteType, *s3Object.Key, *s3Object.VersionId)
-	//}
+	if err != nil {
+		ErrorLogger.Printf("Unable to delete after %d retries: %s %s: %s\n", attempt, deleteType, *s3Object.Key, *s3Object.VersionId)
+	}
 }
 
 
@@ -183,10 +152,6 @@ func deleteAllVersions(bucketName string, region string, svc *s3.S3) bool {
 	err := svc.ListObjectVersionsPages(&s3.ListObjectVersionsInput{Bucket: aws.String(bucketName)},
 		func(page *s3.ListObjectVersionsOutput, lastPage bool) bool {
 			deleteMarkers(page.DeleteMarkers, svc, bucketName).Wait()
-			//Although there is no race condition in the code, there is on the server side
-			//10 milliseconds seems to be enough of a wait time between deletion of a marker
-			//and it's version
-			//time.Sleep(10 * time.Millisecond)
 			deleteVersions(page.Versions, svc, bucketName).Wait()
 			return !lastPage
 		})
